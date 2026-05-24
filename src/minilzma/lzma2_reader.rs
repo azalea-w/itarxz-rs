@@ -1,7 +1,7 @@
 /*
    This code has largely been adapted from the lzma-rust2 crate.
    https://github.com/hasenbanck/lzma-rust2
-   Licensed under MIT
+   Licensed under Apache 2.0
 */
 
 use super::{
@@ -12,6 +12,7 @@ use super::{
 };
 
 use super::ByteReader;
+use super::CountingReader;
 
 pub const COMPRESSED_SIZE_MAX: u32 = 1 << 16;
 
@@ -32,7 +33,7 @@ pub const COMPRESSED_SIZE_MAX: u32 = 1 << 16;
 /// assert_eq!(&decompressed[..], b"Hello, world!");
 /// ```
 pub struct Lzma2Reader<R> {
-    inner: R,
+    inner: CountingReader<R>,
     lz: LzDecoder,
     rc: RangeDecoder<RangeDecoderBuffer>,
     lzma: Option<LzmaDecoder>,
@@ -61,17 +62,33 @@ fn get_dict_size(dict_size: u32) -> u32 {
 impl<R> Lzma2Reader<R> {
     /// Unwraps the reader, returning the underlying reader.
     pub fn into_inner(self) -> R {
-        self.inner
+        self.inner.into_inner()
     }
 
     /// Returns a reference to the inner reader.
     pub fn inner(&self) -> &R {
-        &self.inner
+        self.inner.inner()
     }
 
     /// Returns a mutable reference to the inner reader.
     pub fn inner_mut(&mut self) -> &mut R {
-        &mut self.inner
+        self.inner.inner_mut()
+    }
+
+    /// Returns the total number of bytes read from the input stream.
+    pub fn total_in(&self) -> u64 {
+        self.inner.bytes_read()
+    }
+
+    pub fn set_count(&mut self, count: u64) {
+        *self.inner.bytes_read_mut() = count;
+    }
+
+    /// Replaces the underlying reader with a new one.
+    /// This is useful when the physical source has changed (e.g. after stripping).
+    pub fn replace_inner(&mut self, new_inner: R) {
+        let count = self.total_in();
+        self.inner = CountingReader::with_count(new_inner, count);
     }
 }
 
@@ -84,7 +101,7 @@ impl<R: Read> Lzma2Reader<R> {
         let lz = LzDecoder::new(get_dict_size(dict_size) as _, preset_dict);
         let rc = RangeDecoder::new_buffer(COMPRESSED_SIZE_MAX as _);
         Self {
-            inner,
+            inner: CountingReader::new(inner),
             lz,
             rc,
             lzma: None,
@@ -192,8 +209,7 @@ impl<R: Read> Read for Lzma2Reader<R> {
         let mut off = 0;
         while len > 0 {
             if self.uncompressed_size == 0 {
-                self.decode_chunk_header()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                self.decode_chunk_header().map_err(std::io::Error::other)?;
                 if self.end_reached {
                     return Ok(size);
                 }
@@ -203,20 +219,17 @@ impl<R: Read> Read for Lzma2Reader<R> {
             if !self.is_lzma_chunk {
                 self.lz
                     .copy_uncompressed(&mut self.inner, copy_size_max)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    .map_err(std::io::Error::other)?;
             } else {
                 self.lz.set_limit(copy_size_max);
                 if let Some(lzma) = self.lzma.as_mut() {
                     lzma.decode(&mut self.lz, &mut self.rc)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                        .map_err(std::io::Error::other)?;
                 }
             }
 
             {
-                let copied_size = self
-                    .lz
-                    .flush(buf, off)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                let copied_size = self.lz.flush(buf, off).map_err(std::io::Error::other)?;
                 off = off.saturating_add(copied_size);
                 len = len.saturating_sub(copied_size);
                 size = size.saturating_add(copied_size);

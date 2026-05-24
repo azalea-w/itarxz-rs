@@ -1,7 +1,7 @@
 /*
    This code has largely been adapted from the lzma-rust2 crate.
    https://github.com/hasenbanck/lzma-rust2
-   Licensed under MIT
+   Licensed under Apache 2.0
 */
 
 pub const STATES: usize = 12;
