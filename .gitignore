@@ -30,6 +30,11 @@
 !docker-compose.yml
 !Dockerfile
 
+# * GitHub
+!/.github
+!/.github/*
+!/.github/**/*
+
 # * Meta
 !README.md
 !LICENSE
