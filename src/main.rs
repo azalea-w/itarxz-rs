@@ -8,7 +8,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 
 use anyhow::{Context, Result};
 
-// const CHUNK_SIZE: usize = 1 * 1024 * 1024; // 1 MiB
+const CHUNK_SIZE: usize = 1 * 1024 * 1024; // 1 MiB
 
 fn main() -> Result<()> {
     let mut infile = File::open("test.tar.xz").context("opening test.tar.xz")?;
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
     let compressed_reader = BufReader::new(infile.take(block_header.compressed_size));
 
     let mut outfile = File::create("test.tar").context("creating test.tar")?;
-    decompressor::decompress_lzma2(compressed_reader, &mut outfile)
+    decompressor::decompress_lzma2(compressed_reader, &mut outfile, CHUNK_SIZE)
         .context("decompression failed")?;
 
     println!(
