@@ -117,7 +117,7 @@ impl<R: RangeReader> RangeDecoder<R> {
         }
         result
     }
-    
+
     pub(crate) fn decode_direct_bits(&mut self, count: u32) -> i32 {
         // The following loop is the original function structured in a way,
         // that hopefully the compiler can optimize better.

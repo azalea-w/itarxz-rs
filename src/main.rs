@@ -1,10 +1,11 @@
 pub mod decompressor;
 pub mod minilzma;
+pub mod tar_parser;
 pub mod types;
 pub mod xz_parser;
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Take, Write};
 
 use anyhow::{Context, Result, bail};
 
@@ -36,8 +37,7 @@ fn strip_file_prefix(file: &mut File, length: u64, buffer_size: usize) -> Result
         write_pos += bytes_read as u64;
     }
 
-    file.flush()
-        .context("flushing file after stripping")?;
+    file.flush().context("flushing file after stripping")?;
     file.set_len(write_pos)
         .context("truncating file after stripping")?;
     file.sync_data()
@@ -89,7 +89,7 @@ fn main() -> Result<()> {
     if !input_path.to_lowercase().ends_with(".xz") {
         bail!("Input file must have .xz extension");
     }
-    let output_path = &input_path[..input_path.len() - 3];
+    let output_path = &input_path[..input_path.len() - 7];
 
     let buffer_size = if args.len() >= 3 {
         parse_size(&args[2])? as usize
@@ -125,49 +125,80 @@ fn main() -> Result<()> {
     println!("Stripping XZ headers ({} bytes)...", block_data_offset);
     strip_file_prefix(&mut infile, block_data_offset, buffer_size)?;
 
-    let mut outfile =
-        File::create(output_path).with_context(|| format!("creating {}", output_path))?;
-
     println!("Starting decompression...");
 
-    let mut reader = minilzma::lzma2_reader::Lzma2Reader::new(
-        infile.try_clone()?.take(block_header.compressed_size),
-        1 << 23,
-        None,
+    {
+        let mut reader = minilzma::lzma2_reader::Lzma2Reader::new(
+            infile.try_clone()?.take(block_header.compressed_size),
+            1 << 23,
+            None,
+        );
+
+        drop(infile);
+
+        println!("Starting decompression and untarring to {}...", output_path);
+
+        let mut stripping_reader = StrippingReader {
+            reader: &mut reader,
+            input_path,
+            strip_threshold,
+            buffer_size,
+            total_uncompressed: block_header.uncompressed_size,
+            current_uncompressed: 0,
+        };
+
+        let mut tar = tar_parser::TarParser::new(&mut stripping_reader);
+        tar.untar(output_path)?;
+    }
+
+    println!(
+        "\nSuccessfully decompressed and extracted {} bytes into {}",
+        block_header.uncompressed_size, output_path
     );
 
-    drop(infile);
+    println!("Removing input file {}...", input_path);
+    std::fs::remove_file(input_path)
+        .with_context(|| format!("removing input file {}", input_path))?;
 
-    let mut out_buffer = vec![0u8; buffer_size];
-    let total_uncompressed = block_header.uncompressed_size;
-    let mut current_uncompressed = 0u64;
+    Ok(())
+}
 
-    loop {
-        let bytes_read = reader.read(&mut out_buffer)?;
+struct StrippingReader<'a> {
+    reader: &'a mut minilzma::lzma2_reader::Lzma2Reader<Take<File>>,
+    input_path: &'a str,
+    strip_threshold: u64,
+    buffer_size: usize,
+    total_uncompressed: u64,
+    current_uncompressed: u64,
+}
+
+impl<'a> Read for StrippingReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let bytes_read = self.reader.read(buf)?;
         if bytes_read == 0 {
-            break;
+            return Ok(0);
         }
-        outfile.write_all(&out_buffer[..bytes_read])?;
-        current_uncompressed += bytes_read as u64;
+        self.current_uncompressed += bytes_read as u64;
 
-        let progress = (current_uncompressed as f64 / total_uncompressed as f64) * 100.0;
+        let progress = (self.current_uncompressed as f64 / self.total_uncompressed as f64) * 100.0;
         print!(
-            "\rDecompressing: {:.2}% ({}/{} bytes)",
-            progress, current_uncompressed, total_uncompressed
+            "\rExtracting: {:.2}% ({}/{} bytes)",
+            progress, self.current_uncompressed, self.total_uncompressed
         );
         let _ = std::io::stdout().flush();
 
-        let total_in = reader.total_in();
-        if total_in >= strip_threshold {
+        let total_in = self.reader.total_in();
+        if total_in >= self.strip_threshold {
             let to_strip = total_in;
-            println!("\nStripping {} bytes from file...", to_strip);
 
             let remaining_compressed: u64;
             {
-                let inner_take = reader.inner_mut();
+                let inner_take = self.reader.inner_mut();
                 remaining_compressed = inner_take.limit();
                 let inner_file = inner_take.get_mut();
-                strip_file_prefix(inner_file, to_strip, buffer_size)?;
+                if let Err(e) = strip_file_prefix(inner_file, to_strip, self.buffer_size) {
+                    return Err(std::io::Error::other(e));
+                }
 
                 inner_file.sync_all()?;
             }
@@ -175,22 +206,13 @@ fn main() -> Result<()> {
             let new_infile = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(input_path)
-                .with_context(|| format!("re-opening {} after stripping", input_path))?;
+                .open(self.input_path)?;
 
-            println!(
-                "Logical file size is now {} bytes",
-                new_infile.metadata()?.len()
-            );
-
-            reader.replace_inner(new_infile.take(remaining_compressed));
-            reader.set_count(0);
+            self.reader
+                .replace_inner(new_infile.take(remaining_compressed));
+            self.reader.set_count(0);
         }
-    }
 
-    println!(
-        "\nSuccessfully decompressed {} bytes into {}",
-        block_header.uncompressed_size, output_path
-    );
-    Ok(())
+        Ok(bytes_read)
+    }
 }
