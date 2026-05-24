@@ -1,7 +1,7 @@
 /*
    This code has largely been adapted from the lzma-rust2 crate.
    https://github.com/hasenbanck/lzma-rust2
-   Licensed under MIT
+   Licensed under Apache 2.0
 */
 
 //! LZMA / LZMA2 / LZIP / XZ compression ported from [tukaani xz for java](https://tukaani.org/xz/java.html).
@@ -54,7 +54,6 @@
 
 // TODO: There is a lot of code left that only the "encode" feature uses.
 #![allow(dead_code)]
-#![warn(missing_docs)]
 
 extern crate alloc;
 
@@ -70,7 +69,6 @@ pub(crate) use std::io::Read;
 pub(crate) use std::io::Write;
 
 /// Result type of the crate.
-#[cfg(not(feature = "std"))]
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// The minimal size of a dictionary.
@@ -111,20 +109,6 @@ const TOP_VALUE: u32 = 0x0100_0000;
 const RC_BIT_MODEL_OFFSET: u32 = (1u32 << MOVE_BITS)
     .wrapping_sub(1)
     .wrapping_sub(BIT_MODEL_TOTAL);
-
-/// Helper to set the shared error state and trigger shutdown.
-#[cfg(feature = "std")]
-fn set_error(
-    error: Error,
-    error_store: &std::sync::Arc<std::sync::Mutex<Option<Error>>>,
-    shutdown_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
-    let mut guard = error_store.lock().unwrap();
-    if guard.is_none() {
-        *guard = Some(error);
-    }
-    shutdown_flag.store(true, std::sync::atomic::Ordering::Release);
-}
 
 pub(crate) struct LzmaCoder {
     pub(crate) pos_mask: u32,
@@ -274,7 +258,7 @@ impl LengthCoder {
     }
 }
 
-trait ByteReader {
+pub(crate) trait ByteReader {
     fn read_u8(&mut self) -> Result<u8>;
 
     fn read_u16(&mut self) -> Result<u16>;
@@ -399,36 +383,40 @@ fn copy_error(error: &Error) -> Error {
     Error::new(error.kind(), error.to_string())
 }
 
-struct CountingReader<R> {
+pub struct CountingReader<R> {
     inner: R,
     bytes_read: u64,
 }
 
 impl<R> CountingReader<R> {
-    fn new(inner: R) -> Self {
+    pub fn new(inner: R) -> Self {
         Self {
             inner,
             bytes_read: 0,
         }
     }
 
-    fn with_count(inner: R, bytes_read: u64) -> Self {
+    pub fn with_count(inner: R, bytes_read: u64) -> Self {
         Self { inner, bytes_read }
     }
 
-    fn bytes_read(&self) -> u64 {
+    pub fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
 
-    fn into_inner(self) -> R {
+    pub fn bytes_read_mut(&mut self) -> &mut u64 {
+        &mut self.bytes_read
+    }
+
+    pub fn into_inner(self) -> R {
         self.inner
     }
 
-    fn inner(&self) -> &R {
+    pub fn inner(&self) -> &R {
         &self.inner
     }
 
-    fn inner_mut(&mut self) -> &mut R {
+    pub fn inner_mut(&mut self) -> &mut R {
         &mut self.inner
     }
 }
