@@ -1,7 +1,7 @@
-pub mod types;
-pub mod xz_parser;
 pub mod decompressor;
 pub mod minilzma;
+pub mod types;
+pub mod xz_parser;
 
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -12,9 +12,7 @@ use anyhow::{Context, Result};
 
 fn main() -> Result<()> {
     let mut infile = File::open("test.tar.xz").context("opening test.tar.xz")?;
-    let file_size = infile
-        .seek(SeekFrom::End(0))
-        .context("getting file size")?;
+    let file_size = infile.seek(SeekFrom::End(0)).context("getting file size")?;
     infile.rewind()?;
 
     let _stream_header = xz_parser::parse_stream_header(&mut infile)?;
