@@ -157,6 +157,7 @@ fn main() -> Result<()> {
             initial_offset: 12, // * Stream header
             check_size,
             dry_run,
+            bytes_processed_since_last_strip: 12,
         };
 
         println!("Starting decompression and untarring to {}...", output_path);
@@ -196,6 +197,7 @@ struct StrippingReader<'a> {
     current_uncompressed: u64,
     initial_offset: u64,
     check_size: usize,
+    bytes_processed_since_last_strip: u64,
 }
 
 impl<'a> StrippingReader<'a> {
@@ -209,6 +211,7 @@ impl<'a> StrippingReader<'a> {
             xz_parser::parse_block_header(&mut self.file, record).map_err(std::io::Error::other)?;
 
         self.initial_offset += block_header.block_total_size as u64;
+        self.bytes_processed_since_last_strip += block_header.block_total_size as u64;
 
         let reader = minilzma::lzma2_reader::Lzma2Reader::new(
             self.file.try_clone()?.take(block_header.compressed_size),
@@ -231,6 +234,7 @@ impl<'a> Read for StrippingReader<'a> {
             }
 
             let reader = self.reader.as_mut().unwrap();
+            let prev_in = reader.total_in();
             let bytes_read = reader.read(buf)?;
 
             if bytes_read > 0 {
@@ -245,8 +249,11 @@ impl<'a> Read for StrippingReader<'a> {
                 let _ = std::io::stdout().flush();
 
                 let total_in = reader.total_in();
-                if total_in >= self.strip_threshold {
-                    let to_strip = total_in + self.initial_offset;
+                let consumed_in = total_in - prev_in;
+                self.bytes_processed_since_last_strip += consumed_in;
+
+                if self.bytes_processed_since_last_strip >= self.strip_threshold {
+                    let to_strip = self.bytes_processed_since_last_strip;
 
                     if self.dry_run {
                         println!(
@@ -280,6 +287,7 @@ impl<'a> Read for StrippingReader<'a> {
                     }
                     reader.set_count(0);
                     self.initial_offset = 0;
+                    self.bytes_processed_since_last_strip = 0;
                 }
 
                 return Ok(bytes_read);
@@ -300,6 +308,7 @@ impl<'a> Read for StrippingReader<'a> {
             }
 
             self.initial_offset += total_in + self.check_size as u64 + padding_size;
+            self.bytes_processed_since_last_strip += self.check_size as u64 + padding_size;
             self.file = inner_file;
             self.current_record_idx += 1;
         }
