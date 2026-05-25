@@ -9,7 +9,7 @@ use std::io::{Read, Seek, SeekFrom, Take, Write};
 
 use anyhow::{Context, Result, bail};
 
-fn strip_file_prefix(file: &mut File, length: u64, buffer_size: usize) -> Result<()> {
+fn strip_file_prefix(file: &mut File, path: &str, length: u64, buffer_size: usize) -> Result<()> {
     let metadata = file
         .metadata()
         .context("getting file metadata for stripping")?;
@@ -19,30 +19,39 @@ fn strip_file_prefix(file: &mut File, length: u64, buffer_size: usize) -> Result
         return Ok(());
     }
 
-    let mut buffer = vec![0u8; buffer_size];
-    let mut read_pos = length;
-    let mut write_pos = 0;
+    // * Use a separate handle for reading to have an independent offset.
+    // * This allows the OS to optimize read-ahead and write-behind separately
+    // * and eliminates the need for frequent seeks between read and write positions.
+    let mut reader = File::open(path).context("opening file for reading during stripping")?;
+    reader
+        .seek(SeekFrom::Start(length))
+        .context("seeking to read position")?;
 
-    while read_pos < total_size {
-        file.seek(SeekFrom::Start(read_pos))?;
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
+    file.seek(SeekFrom::Start(0))
+        .context("seeking to write position")?;
 
-        file.seek(SeekFrom::Start(write_pos))?;
-        file.write_all(&buffer[..bytes_read])?;
+    // * Use buffered IO to minimize the number of system calls.
+    let mut buffered_reader = std::io::BufReader::with_capacity(buffer_size, reader);
+    let mut buffered_writer = std::io::BufWriter::with_capacity(buffer_size, file);
 
-        read_pos += bytes_read as u64;
-        write_pos += bytes_read as u64;
-    }
+    std::io::copy(&mut buffered_reader, &mut buffered_writer)
+        .context("copying data during stripping")?;
+    buffered_writer
+        .flush()
+        .context("flushing buffered writer")?;
 
-    file.flush().context("flushing file after stripping")?;
-    file.set_len(write_pos)
+    let written_size = total_size - length;
+    let file_inner = buffered_writer.into_inner().unwrap();
+
+    file_inner
+        .set_len(written_size)
         .context("truncating file after stripping")?;
-    file.sync_data()
+    file_inner
+        .sync_data()
         .context("syncing file data after stripping")?;
-    file.seek(SeekFrom::Start(0))?;
+    file_inner
+        .seek(SeekFrom::Start(0))
+        .context("resetting file pointer after stripping")?;
     Ok(())
 }
 
@@ -200,7 +209,9 @@ impl<'a> Read for StrippingReader<'a> {
                 let inner_take = self.reader.inner_mut();
                 remaining_compressed = inner_take.limit();
                 let inner_file = inner_take.get_mut();
-                if let Err(e) = strip_file_prefix(inner_file, to_strip, self.buffer_size) {
+                if let Err(e) =
+                    strip_file_prefix(inner_file, self.input_path, to_strip, self.buffer_size)
+                {
                     return Err(std::io::Error::other(e));
                 }
 
