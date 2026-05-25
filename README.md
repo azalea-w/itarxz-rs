@@ -22,7 +22,7 @@ The tool works by exploiting the block-based structure of the XZ format and stre
 This process effectively "eats" the compressed file as it produces the extracted contents, allowing for extraction in environments with extremely limited storage space.
 
 ## How to use this?
-`itarxz-rs <input_file.tar.xz> [buffer_size] [strip_threshold]`
+`itarxz-rs <input_file.tar.xz> [buffer_size] [strip_threshold] [--dry-run | -d]`
 
 - `input_file.tar.xz`: The path to the .tar.xz file you want to decompress. The output will be a directory with the same name (minus the `.tar.xz` extension).
 - `buffer_size` (optional): The size of the buffer used for file operations (e.g., `10MB`, `1GB`). Defaults to `1MB`.
@@ -30,7 +30,7 @@ This process effectively "eats" the compressed file as it produces the extracted
 
 **Example:**
 ```bash
-itarxz-rs archive.tar.xz 10MB 100MB
+itarxz-rs archive.tar.xz 100MB 2GB -d
 ```
 
 ## Attribution
