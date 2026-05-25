@@ -19,6 +19,8 @@ fn strip_file_prefix(file: &mut File, path: &str, length: u64, buffer_size: usiz
         return Ok(());
     }
 
+    println!("\nStripping {} bytes from {}", length, path);
+
     // * Use a separate handle for reading to have an independent offset.
     // * This allows the OS to optimize read-ahead and write-behind separately
     // * and eliminates the need for frequent seeks between read and write positions.
@@ -84,13 +86,19 @@ fn parse_size(s: &str) -> Result<u64> {
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let mut dry_run = false;
+    if let Some(pos) = args.iter().position(|a| a == "--dry-run" || a == "-d") {
+        dry_run = true;
+        args.remove(pos);
+    }
+
     if args.len() < 2 {
         println!(
-            "Usage: {} <input_file.xz> [buffer_size] [strip_threshold]",
+            "Usage: {} <input_file.xz> [buffer_size] [strip_threshold] [--dry-run|-d]",
             args[0]
         );
-        println!("Example: {} input.xz 10MB 100MB", args[0]);
+        println!("Example: {} input.xz 10MB 100MB --dry-run", args[0]);
         return Ok(());
     }
 
@@ -115,6 +123,9 @@ fn main() -> Result<()> {
     println!("Configuration:");
     println!("  Buffer size: {} bytes", buffer_size);
     println!("  Strip threshold: {} bytes", strip_threshold);
+    if dry_run {
+        println!("  Dry-run mode: ENABLED");
+    }
 
     let mut infile = std::fs::OpenOptions::new()
         .read(true)
@@ -157,10 +168,11 @@ fn main() -> Result<()> {
             total_uncompressed: block_header.uncompressed_size,
             current_uncompressed: 0,
             initial_offset: block_data_offset,
+            dry_run,
         };
 
         let mut tar = tar_parser::TarParser::new(&mut stripping_reader);
-        tar.untar(output_path)?;
+        tar.untar(output_path, dry_run)?;
     }
 
     println!(
@@ -168,9 +180,13 @@ fn main() -> Result<()> {
         block_header.uncompressed_size, output_path
     );
 
-    println!("Removing input file {}...", input_path);
-    std::fs::remove_file(input_path)
-        .with_context(|| format!("removing input file {}", input_path))?;
+    if !dry_run {
+        println!("Removing input file {}...", input_path);
+        std::fs::remove_file(input_path)
+            .with_context(|| format!("removing input file {}", input_path))?;
+    } else {
+        println!("[Dry-run] Would remove input file {}", input_path);
+    }
 
     Ok(())
 }
@@ -183,6 +199,7 @@ struct StrippingReader<'a> {
     total_uncompressed: u64,
     current_uncompressed: u64,
     initial_offset: u64,
+    dry_run: bool,
 }
 
 impl<'a> Read for StrippingReader<'a> {
@@ -204,27 +221,34 @@ impl<'a> Read for StrippingReader<'a> {
         if total_in >= self.strip_threshold {
             let to_strip = total_in + self.initial_offset;
 
-            let remaining_compressed: u64;
-            {
-                let inner_take = self.reader.inner_mut();
-                remaining_compressed = inner_take.limit();
-                let inner_file = inner_take.get_mut();
-                if let Err(e) =
-                    strip_file_prefix(inner_file, self.input_path, to_strip, self.buffer_size)
+            if self.dry_run {
+                println!(
+                    "\n[Dry-run] Would strip {} bytes from {}",
+                    to_strip, self.input_path
+                );
+            } else {
+                let remaining_compressed: u64;
                 {
-                    return Err(std::io::Error::other(e));
+                    let inner_take = self.reader.inner_mut();
+                    remaining_compressed = inner_take.limit();
+                    let inner_file = inner_take.get_mut();
+                    if let Err(e) =
+                        strip_file_prefix(inner_file, self.input_path, to_strip, self.buffer_size)
+                    {
+                        return Err(std::io::Error::other(e));
+                    }
+
+                    inner_file.sync_all()?;
                 }
 
-                inner_file.sync_all()?;
+                let new_infile = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(self.input_path)?;
+
+                self.reader
+                    .replace_inner(new_infile.take(remaining_compressed));
             }
-
-            let new_infile = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(self.input_path)?;
-
-            self.reader
-                .replace_inner(new_infile.take(remaining_compressed));
             self.reader.set_count(0);
             self.initial_offset = 0;
         }

@@ -11,9 +11,9 @@ impl<R: Read> TarParser<R> {
         Self { reader }
     }
 
-    pub fn untar<P: AsRef<Path>>(&mut self, dest: P) -> Result<()> {
+    pub fn untar<P: AsRef<Path>>(&mut self, dest: P, dry_run: bool) -> Result<()> {
         let dest = dest.as_ref();
-        if !dest.exists() {
+        if !dry_run && !dest.exists() {
             std::fs::create_dir_all(dest).context("creating destination directory")?;
         }
 
@@ -35,19 +35,33 @@ impl<R: Read> TarParser<R> {
 
             match type_flag {
                 b'0' | b'\0' => {
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent).context("creating parent directory")?;
-                    }
-                    let mut file = std::fs::File::create(&path)
-                        .with_context(|| format!("creating file {:?}", path))?;
+                    if dry_run {
+                        println!("\n[Dry-run] Would create file {:?}", path);
+                    } else {
+                        if let Some(parent) = path.parent() {
+                            std::fs::create_dir_all(parent).context("creating parent directory")?;
+                        }
+                        let mut file = std::fs::File::create(&path)
+                            .with_context(|| format!("creating file {:?}", path))?;
 
-                    let mut remaining = size;
-                    let mut buffer = [0u8; 8192];
-                    while remaining > 0 {
-                        let to_read = remaining.min(buffer.len() as u64) as usize;
-                        self.reader.read_exact(&mut buffer[..to_read])?;
-                        file.write_all(&buffer[..to_read])?;
-                        remaining -= to_read as u64;
+                        let mut remaining = size;
+                        let mut buffer = [0u8; 8192];
+                        while remaining > 0 {
+                            let to_read = remaining.min(buffer.len() as u64) as usize;
+                            self.reader.read_exact(&mut buffer[..to_read])?;
+                            file.write_all(&buffer[..to_read])?;
+                            remaining -= to_read as u64;
+                        }
+                    }
+
+                    if dry_run {
+                        let mut remaining = size;
+                        let mut buffer = [0u8; 8192];
+                        while remaining > 0 {
+                            let to_read = remaining.min(buffer.len() as u64) as usize;
+                            self.reader.read_exact(&mut buffer[..to_read])?;
+                            remaining -= to_read as u64;
+                        }
                     }
 
                     let padding = (512 - (size % 512)) % 512;
@@ -57,9 +71,19 @@ impl<R: Read> TarParser<R> {
                     }
                 }
                 b'5' => {
-                    std::fs::create_dir_all(&path).context("creating directory")?;
+                    if dry_run {
+                        println!("\n[Dry-run] Would create directory {:?}", path);
+                    } else {
+                        std::fs::create_dir_all(&path).context("creating directory")?;
+                    }
                 }
                 _ => {
+                    if dry_run {
+                        println!(
+                            "\n[Dry-run] Would skip entry of type {} at {:?}",
+                            type_flag, path
+                        );
+                    }
                     let padding = (512 - (size % 512)) % 512;
                     let to_skip = size + padding;
                     std::io::copy(
