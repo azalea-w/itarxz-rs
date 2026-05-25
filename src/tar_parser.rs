@@ -18,6 +18,8 @@ impl<R: Read> TarParser<R> {
         }
 
         let mut header = [0u8; 512];
+        let mut next_long_name: Option<String> = None;
+
         loop {
             self.reader
                 .read_exact(&mut header)
@@ -27,13 +29,74 @@ impl<R: Read> TarParser<R> {
                 break;
             }
 
-            let name = self.parse_name(&header)?;
+            let mut name = self.parse_name(&header)?;
+            if let Some(long_name) = next_long_name.take() {
+                name = long_name;
+            }
+
             let size = self.parse_octal(&header[124..136])?;
             let type_flag = header[156];
 
             let path = dest.join(name);
 
             match type_flag {
+                b'L' => {
+                    let mut data = vec![0u8; size as usize];
+                    self.reader.read_exact(&mut data).context("reading long name data")?;
+
+                    let padding = (512 - (size % 512)) % 512;
+                    if padding > 0 {
+                        let mut pad_buf = [0u8; 512];
+                        self.reader.read_exact(&mut pad_buf[..padding as usize]).context("reading long name padding")?;
+                    }
+
+                    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+                    let long_name = std::str::from_utf8(&data[..end])
+                        .context("invalid UTF-8 in GNU long name")?
+                        .to_string();
+
+                    next_long_name = Some(long_name);
+                    continue;
+                }
+                b'K' => {
+                    let mut data = vec![0u8; size as usize];
+                    self.reader.read_exact(&mut data).context("reading long link data")?;
+
+                    let padding = (512 - (size % 512)) % 512;
+                    if padding > 0 {
+                        let mut pad_buf = [0u8; 512];
+                        self.reader.read_exact(&mut pad_buf[..padding as usize]).context("reading long link padding")?;
+                    }
+                    continue;
+                }
+                b'x' | b'g' => {
+                    let mut data = vec![0u8; size as usize];
+                    self.reader.read_exact(&mut data).context("reading PAX header data")?;
+
+                    let padding = (512 - (size % 512)) % 512;
+                    if padding > 0 {
+                        let mut pad_buf = [0u8; 512];
+                        self.reader.read_exact(&mut pad_buf[..padding as usize]).context("reading PAX padding")?;
+                    }
+
+                    if let Ok(pax_str) = std::str::from_utf8(&data) {
+                        for line in pax_str.lines() {
+                            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                            if parts.len() == 2 {
+                                let kv = parts[1].strip_suffix('\n').unwrap_or(parts[1]);
+                                let kv_parts: Vec<&str> = kv.splitn(2, '=').collect();
+                                if kv_parts.len() == 2 {
+                                    let key = kv_parts[0];
+                                    let val = kv_parts[1];
+                                    if key == "path" {
+                                        next_long_name = Some(val.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 b'0' | b'\0' => {
                     if dry_run {
                         println!("\n[Dry-run] Would create file {:?}", path);
