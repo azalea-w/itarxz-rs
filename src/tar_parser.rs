@@ -91,6 +91,18 @@ impl<R: Read> TarParser<R> {
     }
 
     fn parse_octal(&self, bytes: &[u8]) -> Result<u64> {
+        if !bytes.is_empty() && (bytes[0] & 0x80) != 0 {
+            let mut val: u64 = 0;
+            for (i, &b) in bytes.iter().enumerate() {
+                if i == 0 {
+                    val = (b & 0x7f) as u64;
+                } else {
+                    val = (val << 8) | (b as u64);
+                }
+            }
+            return Ok(val);
+        }
+
         let s = std::str::from_utf8(bytes).context("invalid UTF-8 in octal field")?;
         let s = s.trim_matches(|c: char| c == '\0' || c.is_whitespace());
         if s.is_empty() {
