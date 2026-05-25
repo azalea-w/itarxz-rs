@@ -61,7 +61,19 @@ pub fn parse_stream_footer<R: Read + Seek>(file: &mut R) -> Result<StreamFooter>
     let backward_size = ((backward_size_encoded + 1) as u64) << 2;
     Ok(StreamFooter {
         backward_size: backward_size as u32,
+        stream_flags: flags,
     })
+}
+
+pub fn get_check_size(flags: [u8; 2]) -> usize {
+    let check_id = flags[1] & 0x0F;
+    match check_id {
+        0 => 0,
+        1 => 4,   // * CRC32
+        4 => 8,   // * CRC64
+        10 => 32, // * SHA-256
+        _ => 0,
+    }
 }
 
 pub fn parse_index<R: Read + Seek>(
@@ -84,15 +96,23 @@ pub fn parse_index<R: Read + Seek>(
     if index_indicator != 0x00 {
         bail!("Unexpected Index Indicator");
     }
-    let num_records = index_data[1];
-    if num_records != 1 {
-        bail!("Multiple blocks not supported (found {})", num_records);
-    }
+    let (num_records, mut pos) =
+        read_multibyte_integer(&index_data[1..]).context("parsing Number of Records")?;
+    pos += 1; // * account for index indicator
 
-    let (unpadded_size, unpadded_len) =
-        read_multibyte_integer(&index_data[2..]).context("parsing Unpadded Size")?;
-    let (uncompressed_size, _) = read_multibyte_integer(&index_data[2 + unpadded_len..])
-        .context("parsing Uncompressed Size")?;
+    let mut records = Vec::with_capacity(num_records as usize);
+    for _ in 0..num_records {
+        let (unpadded_size, unpadded_len) =
+            read_multibyte_integer(&index_data[pos..]).context("parsing Unpadded Size")?;
+        pos += unpadded_len;
+        let (uncompressed_size, uncompressed_len) =
+            read_multibyte_integer(&index_data[pos..]).context("parsing Uncompressed Size")?;
+        pos += uncompressed_len;
+        records.push(IndexRecord {
+            unpadded_size,
+            uncompressed_size,
+        });
+    }
 
     let stored_crc = u32::from_le_bytes(index_data[index_len - 4..].try_into()?);
     let computed_crc = crc32fast::hash(&index_data[..index_len - 4]);
@@ -104,20 +124,13 @@ pub fn parse_index<R: Read + Seek>(
         );
     }
 
-    Ok(IndexInfo {
-        unpadded_size,
-        uncompressed_size,
-    })
+    Ok(IndexInfo { records })
 }
 
 pub fn parse_block_header<R: Read + Seek>(
     file: &mut R,
-    stream_header_size: u64,
-    index_info: &IndexInfo,
+    record: &IndexRecord,
 ) -> Result<BlockHeader> {
-    file.seek(SeekFrom::Start(stream_header_size))
-        .context("seeking to block header")?;
-
     let mut size_byte = [0u8; 1];
     file.read_exact(&mut size_byte)
         .context("reading block header size")?;
@@ -159,14 +172,14 @@ pub fn parse_block_header<R: Read + Seek>(
         pos += len;
         val + 1
     } else {
-        index_info.unpadded_size - block_total_size as u64
+        record.unpadded_size - block_total_size as u64
     };
 
     let uncompressed_size = if uncompressed_size_present {
         let (val, _) = read_multibyte_integer(&rest[pos..]).context("parsing uncompressed size")?;
         val + 1
     } else {
-        index_info.uncompressed_size
+        record.uncompressed_size
     };
 
     Ok(BlockHeader {

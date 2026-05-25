@@ -10,12 +10,18 @@ pub struct StreamHeader {
 #[derive(Debug)]
 pub struct StreamFooter {
     pub backward_size: u32,
+    pub stream_flags: [u8; 2],
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexRecord {
+    pub unpadded_size: u64,
+    pub uncompressed_size: u64,
 }
 
 #[derive(Debug)]
 pub struct IndexInfo {
-    pub unpadded_size: u64,
-    pub uncompressed_size: u64,
+    pub records: Vec<IndexRecord>,
 }
 
 #[derive(Debug)]
