@@ -134,42 +134,32 @@ fn main() -> Result<()> {
         .with_context(|| format!("opening {} with write access", input_path))?;
     let file_size = infile.seek(SeekFrom::End(0)).context("getting file size")?;
     infile.rewind()?;
-
     let footer = xz_parser::parse_stream_footer(&mut infile)?;
     let index_info = xz_parser::parse_index(&mut infile, file_size, footer.backward_size)?;
-    let stream_header_size = 12u64;
-    let block_header = xz_parser::parse_block_header(&mut infile, stream_header_size, &index_info)?;
-
-    let block_data_offset = stream_header_size + block_header.block_total_size as u64;
-
-    println!(
-        "XZ headers parsed ({} bytes). Strip will be combined with first data strip.",
-        block_data_offset
-    );
+    infile.seek(SeekFrom::Start(12))?;
 
     println!("Starting decompression...");
 
+    let total_uncompressed: u64 = index_info.records.iter().map(|r| r.uncompressed_size).sum();
+    let check_size = xz_parser::get_check_size(footer.stream_flags);
+
     {
-        let mut reader = minilzma::lzma2_reader::Lzma2Reader::new(
-            infile.try_clone()?.take(block_header.compressed_size),
-            1 << 23,
-            None,
-        );
-
-        drop(infile);
-
-        println!("Starting decompression and untarring to {}...", output_path);
-
         let mut stripping_reader = StrippingReader {
-            reader: &mut reader,
+            file: infile,
             input_path,
             strip_threshold,
             buffer_size,
-            total_uncompressed: block_header.uncompressed_size,
+            records: index_info.records,
+            current_record_idx: 0,
+            reader: None,
+            total_uncompressed,
             current_uncompressed: 0,
-            initial_offset: block_data_offset,
+            initial_offset: 12, // * Stream header
+            check_size,
             dry_run,
         };
+
+        println!("Starting decompression and untarring to {}...", output_path);
 
         let mut tar = tar_parser::TarParser::new(&mut stripping_reader);
         tar.untar(output_path, dry_run)?;
@@ -177,7 +167,7 @@ fn main() -> Result<()> {
 
     println!(
         "\nSuccessfully decompressed and extracted {} bytes into {}",
-        block_header.uncompressed_size, output_path
+        total_uncompressed, output_path
     );
 
     if !dry_run {
@@ -192,67 +182,126 @@ fn main() -> Result<()> {
 }
 
 struct StrippingReader<'a> {
-    reader: &'a mut minilzma::lzma2_reader::Lzma2Reader<Take<File>>,
+    file: File,
     input_path: &'a str,
     strip_threshold: u64,
     buffer_size: usize,
+    dry_run: bool,
+
+    records: Vec<crate::types::IndexRecord>,
+    current_record_idx: usize,
+    reader: Option<minilzma::lzma2_reader::Lzma2Reader<Take<File>>>,
+
     total_uncompressed: u64,
     current_uncompressed: u64,
     initial_offset: u64,
-    dry_run: bool,
+    check_size: usize,
+}
+
+impl<'a> StrippingReader<'a> {
+    fn setup_next_block(&mut self) -> std::io::Result<()> {
+        if self.current_record_idx >= self.records.len() {
+            return Ok(());
+        }
+
+        let record = &self.records[self.current_record_idx];
+        let block_header =
+            xz_parser::parse_block_header(&mut self.file, record).map_err(std::io::Error::other)?;
+
+        self.initial_offset += block_header.block_total_size as u64;
+
+        let reader = minilzma::lzma2_reader::Lzma2Reader::new(
+            self.file.try_clone()?.take(block_header.compressed_size),
+            block_header.dict_size,
+            None,
+        );
+        self.reader = Some(reader);
+        Ok(())
+    }
 }
 
 impl<'a> Read for StrippingReader<'a> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let bytes_read = self.reader.read(buf)?;
-        if bytes_read == 0 {
-            return Ok(0);
-        }
-        self.current_uncompressed += bytes_read as u64;
+        loop {
+            if self.reader.is_none() {
+                if self.current_record_idx >= self.records.len() {
+                    return Ok(0);
+                }
+                self.setup_next_block()?;
+            }
 
-        let progress = (self.current_uncompressed as f64 / self.total_uncompressed as f64) * 100.0;
-        print!(
-            "\rExtracting: {:.2}% ({}/{} bytes)",
-            progress, self.current_uncompressed, self.total_uncompressed
-        );
-        let _ = std::io::stdout().flush();
+            let reader = self.reader.as_mut().unwrap();
+            let bytes_read = reader.read(buf)?;
 
-        let total_in = self.reader.total_in();
-        if total_in >= self.strip_threshold {
-            let to_strip = total_in + self.initial_offset;
+            if bytes_read > 0 {
+                self.current_uncompressed += bytes_read as u64;
 
-            if self.dry_run {
-                println!(
-                    "\n[Dry-run] Would strip {} bytes from {}",
-                    to_strip, self.input_path
+                let progress =
+                    (self.current_uncompressed as f64 / self.total_uncompressed as f64) * 100.0;
+                print!(
+                    "\rExtracting: {:.2}% ({}/{} bytes)",
+                    progress, self.current_uncompressed, self.total_uncompressed
                 );
-            } else {
-                let remaining_compressed: u64;
-                {
-                    let inner_take = self.reader.inner_mut();
-                    remaining_compressed = inner_take.limit();
-                    let inner_file = inner_take.get_mut();
-                    if let Err(e) =
-                        strip_file_prefix(inner_file, self.input_path, to_strip, self.buffer_size)
-                    {
-                        return Err(std::io::Error::other(e));
-                    }
+                let _ = std::io::stdout().flush();
 
-                    inner_file.sync_all()?;
+                let total_in = reader.total_in();
+                if total_in >= self.strip_threshold {
+                    let to_strip = total_in + self.initial_offset;
+
+                    if self.dry_run {
+                        println!(
+                            "\n[Dry-run] Would strip {} bytes from {}",
+                            to_strip, self.input_path
+                        );
+                    } else {
+                        let remaining_compressed: u64;
+                        {
+                            let inner_take = reader.inner_mut();
+                            remaining_compressed = inner_take.limit();
+                            let inner_file = inner_take.get_mut();
+                            if let Err(e) = strip_file_prefix(
+                                inner_file,
+                                self.input_path,
+                                to_strip,
+                                self.buffer_size,
+                            ) {
+                                return Err(std::io::Error::other(e));
+                            }
+
+                            inner_file.sync_all()?;
+                        }
+
+                        let new_infile = std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(self.input_path)?;
+
+                        reader.replace_inner(new_infile.take(remaining_compressed));
+                    }
+                    reader.set_count(0);
+                    self.initial_offset = 0;
                 }
 
-                let new_infile = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(self.input_path)?;
-
-                self.reader
-                    .replace_inner(new_infile.take(remaining_compressed));
+                return Ok(bytes_read);
             }
-            self.reader.set_count(0);
-            self.initial_offset = 0;
-        }
 
-        Ok(bytes_read)
+            // * End of current block
+            let reader_owned = self.reader.take().unwrap();
+            let total_in = reader_owned.total_in();
+            let take = reader_owned.into_inner();
+            let mut inner_file = take.into_inner();
+
+            // * Handle padding and check
+            let record = &self.records[self.current_record_idx];
+            let padding_size = ((record.unpadded_size + 3) & !3) - record.unpadded_size;
+            let to_skip = self.check_size as u64 + padding_size;
+            if to_skip > 0 {
+                inner_file.seek(SeekFrom::Current(to_skip as i64))?;
+            }
+
+            self.initial_offset += total_in + self.check_size as u64 + padding_size;
+            self.file = inner_file;
+            self.current_record_idx += 1;
+        }
     }
 }
