@@ -162,8 +162,8 @@ pub fn parse_block_header<R: Read + Seek>(
     }
 
     let flags = rest[0];
-    let compressed_size_present = (flags & 0x02) != 0;
-    let uncompressed_size_present = (flags & 0x01) != 0;
+    let compressed_size_present = (flags & 0x40) != 0;
+    let uncompressed_size_present = (flags & 0x80) != 0;
 
     let mut pos = 1;
 
@@ -176,15 +176,59 @@ pub fn parse_block_header<R: Read + Seek>(
     };
 
     let uncompressed_size = if uncompressed_size_present {
-        let (val, _) = read_multibyte_integer(&rest[pos..]).context("parsing uncompressed size")?;
+        let (val, len) =
+            read_multibyte_integer(&rest[pos..]).context("parsing uncompressed size")?;
+        pos += len;
         val + 1
     } else {
         record.uncompressed_size
     };
 
+    let num_filters = (flags & 0x03) + 1;
+    let mut dict_size = 1 << 23; // Safe default of 8 MiB if not found
+
+    for _ in 0..num_filters {
+        if pos >= rest.len() {
+            break;
+        }
+        let (filter_id, len) = read_multibyte_integer(&rest[pos..]).context("parsing Filter ID")?;
+        pos += len;
+
+        let (props_size, len) =
+            read_multibyte_integer(&rest[pos..]).context("parsing Size of Properties")?;
+        pos += len;
+
+        let props_size = props_size as usize;
+        if pos + props_size > rest.len() {
+            bail!("Block header too short for filter properties");
+        }
+
+        let props = &rest[pos..pos + props_size];
+        pos += props_size;
+
+        if filter_id == 0x21 {
+            // LZMA2 filter
+            if props.is_empty() {
+                bail!("LZMA2 filter properties are empty");
+            }
+            let d = props[0];
+            if d > 40 {
+                bail!("Invalid LZMA2 dictionary size: {}", d);
+            }
+            dict_size = if d == 40 {
+                u32::MAX
+            } else {
+                let base = 2 + (d & 1) as u64;
+                let shift = (d / 2) + 11;
+                (base << shift) as u32
+            };
+        }
+    }
+
     Ok(BlockHeader {
         compressed_size,
         uncompressed_size,
         block_total_size,
+        dict_size,
     })
 }

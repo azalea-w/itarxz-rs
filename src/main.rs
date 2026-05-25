@@ -212,7 +212,7 @@ impl<'a> StrippingReader<'a> {
 
         let reader = minilzma::lzma2_reader::Lzma2Reader::new(
             self.file.try_clone()?.take(block_header.compressed_size),
-            1 << 23,
+            block_header.dict_size,
             None,
         );
         self.reader = Some(reader);

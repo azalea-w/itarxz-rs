@@ -29,6 +29,7 @@ pub struct BlockHeader {
     pub compressed_size: u64,
     pub uncompressed_size: u64,
     pub block_total_size: usize,
+    pub dict_size: u32,
 }
 
 pub fn read_multibyte_integer(data: &[u8]) -> Result<(u64, usize)> {
