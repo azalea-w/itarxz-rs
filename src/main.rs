@@ -122,8 +122,10 @@ fn main() -> Result<()> {
 
     let block_data_offset = stream_header_size + block_header.block_total_size as u64;
 
-    println!("Stripping XZ headers ({} bytes)...", block_data_offset);
-    strip_file_prefix(&mut infile, block_data_offset, buffer_size)?;
+    println!(
+        "XZ headers parsed ({} bytes). Strip will be combined with first data strip.",
+        block_data_offset
+    );
 
     println!("Starting decompression...");
 
@@ -145,6 +147,7 @@ fn main() -> Result<()> {
             buffer_size,
             total_uncompressed: block_header.uncompressed_size,
             current_uncompressed: 0,
+            initial_offset: block_data_offset,
         };
 
         let mut tar = tar_parser::TarParser::new(&mut stripping_reader);
@@ -170,6 +173,7 @@ struct StrippingReader<'a> {
     buffer_size: usize,
     total_uncompressed: u64,
     current_uncompressed: u64,
+    initial_offset: u64,
 }
 
 impl<'a> Read for StrippingReader<'a> {
@@ -189,7 +193,7 @@ impl<'a> Read for StrippingReader<'a> {
 
         let total_in = self.reader.total_in();
         if total_in >= self.strip_threshold {
-            let to_strip = total_in;
+            let to_strip = total_in + self.initial_offset;
 
             let remaining_compressed: u64;
             {
@@ -211,6 +215,7 @@ impl<'a> Read for StrippingReader<'a> {
             self.reader
                 .replace_inner(new_infile.take(remaining_compressed));
             self.reader.set_count(0);
+            self.initial_offset = 0;
         }
 
         Ok(bytes_read)
